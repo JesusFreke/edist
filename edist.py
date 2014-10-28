@@ -15,169 +15,152 @@ limitations under the License.
 """
 
 import json
+import lmfit
 import numpy
 import sys
 
-class Exploration(object):
-  """This class represents a single "line" of exploration.
-
-  Given an initial point and a dimension, it starts descending the gradient of the error function along
-  that dimension until it reaches a local minima. It then adds new Explorations for every point from one "rim"
-  of the minima to the other rim. This will typically be 3 points: the point to the "left" of the minima, the minima
-  itself, and the point to the "right" of the minima, unless the minima extends across multiple points with the same
-  value (e.g. 0)
-  """
-
-  def __init__(self, explorer, location, dimension):
-    self.explorer = explorer
-    self.location = location
-    self.dimension = dimension
-    self.vector = numpy.array([0, 0, 0], float)
-    self.vector[dimension] = 1.0/32
-    self.finished = False
-
-    # An exploration is identified by the 2 coordinates not being explored, and the dimension of exploration
-    key = list(self.location)
-    key[dimension] = None
-    self.key = (tuple(key), dimension)
-
-  def __repr__(self):
-    return str(self.key)
-
-  def __hash__(self):
-    return hash(self.key)
-
-  def __eq__(self, other):
-    if isinstance(other, tuple):
-      return ((self.key[0][0] is None or self.key[0][0] == other[0]) and
-              (self.key[0][1] is None or self.key[0][1] == other[1]) and
-              (self.key[0][2] is None or self.key[0][2] == other[2]) and
-              (self.key[1] == other[1]))
-    return self.key == other.key
-
-  def __ne__(self, other):
-    return not self.__eq__(other)
-
-  def explore(self):
-    initial_value = self.explorer.get_value(self.location)
-
-    left = self.explorer.get_value(self.location - self.vector)
-
-    # which way is down?
-    if left < initial_value:
-      distance = -2
-      direction = -1
-      old_value = left
-    else:
-      distance = 1
-      direction = 1
-      old_value = initial_value
-
-    # now go down, until we start going up again
-    while True:
-      value = self.explorer.get_value(self.location + self.vector * distance)
-      if value > old_value:
-        # we went up..
-        self.explorer.add_explorations(self.location + self.vector * distance)
-        old_value = value
-        while True:
-          # now go back the other way until we hit the other rim, adding the values for further exploration
-          distance -= direction
-          value = self.explorer.get_value(self.location + self.vector * distance)
-          self.explorer.add_explorations(self.location + self.vector * distance)
-          if value > old_value:
-            break
-          old_value = value
-        break
-      old_value = value
-      distance += direction
+class TooManyIterationsException(Exception):
+  pass
 
 class Explorer(object):
-  """This class tries to "explore" the local minima of a function, assuming the minima is convex.
+  """This class tries to "explore" the local minima of the error function.
+
+  The error function is the sum of square of distance errors for known distances.
 
   Given an initial location near a local minima, it will attempt to descend the minima, and then evaluate all points on
   a grid of a fixed size (currently hard-coded to 1/32) in and around that local minima.
   """
 
-  # The dimensions for exploration
-  X = 0
-  Y = 1
-  Z = 2
-
-  def __init__(self, func):
-    self.explorations = set()
-    self.to_explore = []
+  def __init__(self, connections, limit):
     self.values = {}
-    self.func = func
+    self.connections = connections
+    self.correct_locations = []
+    self.limit = limit
 
-  def explore(self, location, limit):
+  def explore(self, location):
     """Explore the local minima near location.
 
-    If more than [limit] points are explored, then the exploration is ended early and False is returned
-    Otherwise, returns True
+    This calculates the error function for all grid-aligned locations in and around the volume where error=0.
+    Afterwards, the correct_locations field will be populated with all the grid-aligned locations where error=0.
+
+    Raises:
+      TooManyIterationsException: if more than [limit] (from the constructor) locations are calculated
     """
-    self.add_explorations(tuple(location))
+    self.generic_explore(location,
+                         lambda location: self.explore_plane(location),
+                         lambda params: self.objective(params),
+                         3,
+                         False)
 
-    i = 0
-    while self.to_explore:
-      exploration = self.to_explore.pop()
-      exploration.explore()
+  def minimize(self, initial_guess, objective, dimensions):
+    params = lmfit.Parameters()
+    params.add('x', value=initial_guess[0], vary=True)
+    params.add('y', value=initial_guess[1], vary=False)
+    params.add('z', value=initial_guess[2], vary=False)
 
-      i += 1
-      if i > limit:
+    if dimensions > 1:
+      params['y'].vary = True
+    if dimensions > 2:
+      params['z'].vary = True
+
+    estimation = lmfit.minimize(objective, params)
+    if estimation.success:
+      return numpy.array([estimation.params['x'].value,
+                          estimation.params['y'].value,
+                          estimation.params['z'].value])
+    return None
+
+  def objective(self, params, x=None, y=None, z=None):
+    """An objective function for use with lmfit's minimize function."""
+
+    if x is None:
+      x = params['x'].value
+    if y is None:
+      y = params['y'].value
+    if z is None:
+      z = params['z'].value
+    guess = numpy.array([x, y, z])
+    error = []
+
+    for name, other_location, expected_distance in self.connections:
+      error.append(self.calculate_single_error(guess, other_location, expected_distance) ** 2)
+    return error
+
+  def generic_explore(self, location, explore_func, objective_func, dimensions, exit_early=True):
+    if self.get_error(location) != 0:
+      minimum_location = self.minimize(location, objective_func, dimensions)
+
+      minimum_value = self.get_error(minimum_location)
+      if minimum_value > .0001 and exit_early:
         return False
+    else:
+      minimum_location = location
+
+    initial_location = numpy.rint(minimum_location * 32) / 32
+    next_location = initial_location
+    explore_func(next_location)
+
+    vector = numpy.array([0, 0, 0], float)
+    vector[dimensions-1] = 1/32.0
+
+    next_location = next_location + vector
+    while explore_func(next_location):
+      next_location = next_location + vector
+
+    next_location = initial_location - vector
+    while explore_func(next_location):
+      next_location = next_location - vector
+
     return True
 
-  def add_exploration(self, location, dimension):
-    """Attempt to add an exploration for the given location and dimension."""
-    exploration = Exploration(self, location, dimension)
-    # We only add the new exploration if there isn't already one for that particular "line"
-    if exploration not in self.explorations:
-      exploration = Exploration(self, location, dimension)
-      self.explorations.add(exploration)
-      self.to_explore.append(exploration)
+  def explore_line(self, location):
+    return self.generic_explore(location,
+                               lambda location: self.get_error(location) < .0001,
+                               lambda params: self.objective(params, y=location[1], z=location[2]),
+                               1)
 
-  def add_explorations(self, location):
-    """Attempt to add explorations for every line from the given point."""
-    self.add_exploration(location, 0)
-    self.add_exploration(location, 1)
-    self.add_exploration(location, 2)
+  def explore_plane(self, location):
+    return self.generic_explore(location,
+                               lambda location: self.explore_line(location),
+                               lambda params: self.objective(params, z=location[2]),
+                               2)
 
-  def get_value(self, location):
-    """Gets the value for the function at the given location."""
+  def get_error(self, location):
+    """Gets the error value at the given location."""
     location_tuple = tuple(location)
     value = self.values.get(location_tuple)
     if value is not None:
       return value
     else:
-      value = self.func(location)
+      value = self.calculate_error(location)
       self.values[location_tuple] = value
+      if len(self.values) > self.limit:
+        raise TooManyIterationsException()
       return value
 
-def calculateError(location, connections, correct_locations):
-  """Calculates the square of the distance errors for the given location."""
-  error = 0
-  for (name, other_location, expected_distance) in connections:
-    actual_distance = numpy.linalg.norm((location - other_location).astype(numpy.float32))
+  def calculate_single_error(self, location, other_location, expected_distance):
+    """Calculates the raw error for a single known distance."""
 
-    if round(actual_distance, 3) == expected_distance:
-      continue
+    # First, calculate the distance using 32-bit floats, to match the calculation used by the game
+    float32_distance = numpy.linalg.norm((location - other_location).astype(numpy.float32))
+    if round(float32_distance, 3) == expected_distance:
+      return 0
 
-    delta = actual_distance - expected_distance
-    # Take into account that the expected distance is actually a range from
-    # [expected_distance - .0005, expected_distance + .0005)
-    if delta < -.0005:
-      delta += .0005
-    elif delta > .0005:
-      delta -= .0005
+    # Now, recalculate the distance using 64-bit floats to get a smoother function, which
+    # works better with lmfit's minimizer
+    actual_distance = numpy.linalg.norm(location - other_location)
+    return actual_distance - expected_distance
 
-    error += delta ** 2
+  def calculate_error(self, location):
+    """Calculates the square of the distance errors for the given location."""
+    error = 0
+    for (name, other_location, expected_distance) in self.connections:
+      error += self.calculate_single_error(location, other_location, expected_distance)  ** 2
 
-  # This shouldn't get called for the same location twice, since we're memoizing the results in Explorer.get_value
-  if error == 0:
-    correct_locations.append(location)
-
-  return error
+    # This shouldn't get called for the same location twice, since we're memoizing the results in Explorer.get_error
+    if error == 0:
+      self.correct_locations.append(location)
+    return error
 
 def failure(message):
   print "******************************"
@@ -197,12 +180,11 @@ def main():
   for star in j:
     stars[star["name"]] = star
 
-  for star in stars.values():
+  for star in sorted(stars.values(), key=lambda x: x["name"]):
     if not star.get("calculated") or not star.get("distances"):
       continue
 
     connections = []
-    correctLocations = []
 
     for distance_item in star["distances"]:
       system = distance_item["system"]
@@ -214,17 +196,20 @@ def main():
                                        float(other_star["z"])]), distance))
 
     original_location = numpy.array([float(star["x"]), float(star["y"]), float(star["z"])])
-    explorer = Explorer(lambda location: calculateError(location, connections, correctLocations))
-    success = explorer.explore(original_location, 20000)
-    if not success:
+    explorer = Explorer(connections, 5000)
+    try:
+      explorer.explore(original_location)
+    except TooManyIterationsException:
       failure("Failure: %s: Took too many iterations" % star["name"])
-    elif len(correctLocations) == 0:
+      continue
+
+    if len(explorer.correct_locations) == 0:
       failure("Failure: %s: Couldn't find a correct location" % star["name"])
-    elif len(correctLocations) > 1:
+    elif len(explorer.correct_locations) > 1:
       failure("Failure: %s: Found multiple correct locations" % star["name"])
-    elif not numpy.array_equal(correctLocations[0], original_location):
+    elif not numpy.array_equal(explorer.correct_locations[0], original_location):
       failure("Failure: %s: Found location %s, but doesn't match original location %s" % (star["name"],
-                                                                                          correctLocations[0],
+                                                                                          explorer.correct_locations[0],
                                                                                           original_location))
     else:
       print "Success: %s: Verified location after evaluating %d points" % (star["name"], len(explorer.values))
