@@ -156,6 +156,9 @@ class Explorer(object):
       error += self.calculate_single_error(location, other_location, expected_distance)  ** 2
 
     # This shouldn't get called for the same location twice, since we're memoizing the results in Explorer.get_error
-    if error == 0:
+    if error == 0 and is_grid_aligned(location):
       self.correct_locations.append(location)
     return error
+
+def is_grid_aligned(location):
+  return numpy.array_equal(location, numpy.rint(location * 32) / 32)
