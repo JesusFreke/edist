@@ -5,7 +5,7 @@ there is only 1 grid-aligned point in this volume, and that it matches
 the coordinate of the star in systems.json
 
 Usage:
-python edist.py systems.json
+python verify.py systems.json
 
 Where systems.json is a file in the format of systems.json
 from https://github.com/SteveHodge/ed-systems

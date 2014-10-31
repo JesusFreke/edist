@@ -27,7 +27,7 @@ def failure(message):
 
 def main():
   if len(sys.argv) != 2:
-    print "Usage: edist.py systems.json"
+    print "Usage: verify.py systems.json"
     print "Where systems.json is a file in the format of systems.json " \
         "from https://github.com/SteveHodge/ed-systems"
 
