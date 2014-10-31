@@ -89,7 +89,7 @@ class Explorer(object):
       minimum_location = self.minimize(location, objective_func, dimensions)
 
       minimum_value = self.get_error(minimum_location)
-      if minimum_value > .0001 and exit_early:
+      if minimum_value > .001 and exit_early:
         return False
     else:
       minimum_location = location
@@ -141,7 +141,7 @@ class Explorer(object):
 
     # First, calculate the distance using 32-bit floats, to match the calculation used by the game
     float32_distance = numpy.linalg.norm((location - other_location).astype(numpy.float32))
-    if round(float32_distance, 3) == expected_distance:
+    if round(float32_distance, 2) == expected_distance:
       return 0
 
     # Now, recalculate the distance using 64-bit floats to get a smoother function, which
